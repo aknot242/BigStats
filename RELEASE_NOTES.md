@@ -1,5 +1,25 @@
 # RELEASE NOTES
 
+## v0.5.0-release
+
+### Features
+
+* Added Support for SSL Statistics ("size":"large")
+* Added Support for scrapers/pollers through 'poll' mode. Stat scrapers can retrieve stats with: `GET /mgmt/shared/bigstats_exporter`
+* Refactored data export object model for easier consumption.
+
+### Fixes
+
+* Provided default values in BigStats Settings Schema for simplified setup/administration.
+* Handles VIP's with no pool members in 'medium' and 'large' outputs.
+
+### Known Issues
+
+* Dropped support for BIG-IP v12 as cannot save/load settings. Perssited stats, and 'loadState()', were added in BIG-IP v13.
+* Should increase Unit Test coverage
+
+---
+
 ## v0.4.1-release
 
 Bug fix release:

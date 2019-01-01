@@ -8,19 +8,14 @@
 */
 'use strict';
 
-const logger = require('f5-logger').getInstance();
 const bigStatsSettingsPath = '/shared/bigstats_settings';
-const StatsD = require('node-statsd');
-const kafka = require('kafka-node');
-const Util = require('./util');
-const Producer = kafka.Producer;
-
-var DEBUG = false;
+const bigStatsExporterPath = '/shared/bigstats_exporter';
+const util = require('./util');
 
 function BigStats () {
-  this.util = new Util('BigStats');
   this.config = {};
   this.stats = {};
+  util.init('BigStats');
 }
 
 BigStats.prototype.WORKER_URI_PATH = 'shared/bigstats';
@@ -31,15 +26,17 @@ BigStats.prototype.isSingleton = true;
  * handle onStart
  */
 BigStats.prototype.onStart = function (success, error) {
-  logger.info(this.util.formatLogMessage('Starting...'));
+  util.logInfo('Starting...');
 
   try {
     // Make the BigStats_Settings (persisted state) worker a dependency.
     var bigStatsSettingsUrl = this.restHelper.makeRestnodedUri(bigStatsSettingsPath);
+    let bigStatsExporterUrl = this.restHelper.makeRestnodedUri(bigStatsExporterPath);
     this.dependencies.push(bigStatsSettingsUrl);
+    this.dependencies.push(bigStatsExporterUrl);
     success();
   } catch (err) {
-    logger.info(this.util.formatLogMessage(`onStart() - Error starting worker: ${err}`));
+    util.logError(`onStart() - Error starting worker: ${err}`);
     error(err);
   }
 };
@@ -54,13 +51,12 @@ BigStats.prototype.onStartCompleted = function (success, error) {
       // Setup Task-Scheduler to poll this worker via onPost()
       return this.createScheduler();
     })
-
     .then((statusCode) => {
-      if (DEBUG === true) { logger.info(this.util.formatLogMessage(`onStartCompleted() - Scheduler response code: ${statusCode}`)); }
+      util.logDebug(`onStartCompleted() - Scheduler response code: ${statusCode}`);
       success();
     })
     .catch((err) => {
-      logger.info(this.util.formatLogMessage(`onStartCompleted() - Error starting worker: ${err}`));
+      util.logError(`onStartCompleted() - Error starting worker: ${err}`);
       error(err);
     });
 };
@@ -71,23 +67,25 @@ BigStats.prototype.onStartCompleted = function (success, error) {
 BigStats.prototype.onPost = function (restOperation) {
   var onPostdata = restOperation.getBody();
 
-  if (DEBUG === true) { logger.info(this.util.formatLogMessage(`onPost receved data: ${JSON.stringify(onPostdata)}`)); }
+  util.logDebug(`onPost received data: ${JSON.stringify(onPostdata)}`);
 
   this.getSettings()
     .then(() => {
       if (this.config.enabled === false) {
-        logger.info(this.util.formatLogMessage('[BigStats] onPost() - config.enabled is set to \'false\''));
+        util.logInfo('onPost() - config.enabled is set to \'false\'');
         return;
       }
       // Execute stats collection
-      this.pullStats();
+      return this.pullStats();
+    })
+    .then((statsObj) => {
+      return this.exportStats(statsObj);
     })
     .catch((err) => {
-      logger.info(this.util.formatLogMessage(`onPost() - Error handling POST: ${err}`));
+      util.logError(`onPost() - Error handling POST: ${err}`);
     });
 
   // Acknowledge the Scheduler Task
-  restOperation.setBody('BigStats says, Thanks!!');
   this.completeRestOperation(restOperation);
 };
 
@@ -120,22 +118,20 @@ BigStats.prototype.createScheduler = function () {
 
     this.restRequestSender.sendPost(restOp)
       .then((resp) => {
-        if (DEBUG === true) {
-          logger.info(this.util.formatLogMessage(`createScheduler() - resp.statusCode: ${JSON.stringify(resp.statusCode)}`));
-          logger.info(this.util.formatLogMessage(`createScheduler() - resp.body: ${JSON.stringify(resp.body, '', '\t')}`));
-        }
+        util.logDebug(`createScheduler() - resp.statusCode: ${JSON.stringify(resp.statusCode)}`);
+        util.logDebug(`createScheduler() - resp.body: ${JSON.stringify(resp.body, '', '\t')}`);
 
         resolve(resp.statusCode);
       })
-      .catch((error) => {
-        let errorStatusCode = error.getResponseOperation().getStatusCode();
-        var errorBody = error.getResponseOperation().getBody();
+      .catch((err) => {
+        var errorStatusCode = err.getResponseOperation().getStatusCode();
+        var errorBody = err.getResponseOperation().getBody();
 
         if (errorBody.message.startsWith('Duplicate item')) {
-          logger.info(this.util.formatLogMessage(`createScheduler() - Status Code: ${errorStatusCode} Message: ${errorBody.message}`));
+          util.logError(`createScheduler() - Status Code: ${errorStatusCode} Message: ${errorBody.message}`);
           resolve(errorStatusCode + ' - Scheduler entry exists.');
         } else {
-          logger.info(this.util.formatLogMessage(`createScheduler() - Status Code: ${errorStatusCode} Message: ${errorBody.message}`));
+          util.logError(`createScheduler() - Status Code: ${errorStatusCode} Message: ${errorBody.message}`);
           reject(errorStatusCode);
         }
       });
@@ -152,20 +148,20 @@ BigStats.prototype.createScheduler = function () {
  * @returns {String} HTTP Status code
  */
 BigStats.prototype.updateScheduler = function (interval) {
-  logger.info(this.util.formatLogMessage('updateScheduler() - New Settings detected, Updating Scheduler.'));
+  util.logInfo('updateScheduler() - New Settings detected, Updating Scheduler.');
 
   // Execute update to the Task Shceduler interval
   this.getSchedulerId()
     .then((id) => {
-      if (DEBUG === true) { logger.info(this.util.formatLogMessage(`getSchedulerId() - Scheduler Task id: ${id}`)); }
+      util.logDebug(`getSchedulerId() - Scheduler Task id: ${id}`);
       return this.patchScheduler(id, interval);
     })
     .then((statusCode) => {
-      if (DEBUG === true) { logger.info(this.util.formatLogMessage(`updateScheduler() results: ${statusCode}`)); }
+      util.logDebug(`updateScheduler() results: ${statusCode}`);
       return statusCode;
     })
     .catch((err) => {
-      logger.info(this.util.formatLogMessage(`updateScheduler() - Error updating Task Scheduler: ${err}`));
+      util.logError(`updateScheduler() - Error updating Task Scheduler: ${err}`);
     });
 };
 
@@ -189,14 +185,14 @@ BigStats.prototype.getSchedulerId = function () {
         });
       })
       .catch((err) => {
-        logger.info(this.util.formatLogMessage(`getSchedulerId() - Error retrieving Task Scheduler ID: ${err}`));
+        util.logError(`getSchedulerId() - Error retrieving Task Scheduler ID: ${err}`);
         reject(err);
       });
   });
 };
 
 /**
- * Patches the 'interval' value of a task-shceduler job
+ * Patches the 'interval' value of a task-scheduler job
  *
  * @param {String} id Unique identifier of existing task-scheduler task
  * @param {Integer} interval Stat exporting interval
@@ -219,11 +215,11 @@ BigStats.prototype.patchScheduler = function (id, interval) {
 
     this.restRequestSender.sendPatch(restOp)
       .then(function (resp) {
-        if (DEBUG === true) { logger.info(this.util.formatLogMessage(`patchScheduler() - Response Code: ${resp.statusCode}`)); }
+        util.logDebug(`patchScheduler() - Response Code: ${resp.statusCode}`);
         resolve(resp.statusCode);
       })
       .catch((err) => {
-        logger.info(this.util.formatLogMessage(`patchScheduler() - Error patching scheduler interval: ${err}`));
+        util.logError(`patchScheduler() - Error patching scheduler interval: ${err}`);
         reject(err);
       });
   });
@@ -242,14 +238,14 @@ BigStats.prototype.getSettings = function () {
 
     this.restRequestSender.sendGet(restOp)
       .then((resp) => {
-        if (DEBUG === true) { logger.info(this.util.formatLogMessage(`getSettings() - Response from BigStatsSettings worker: ${JSON.stringify(resp.body.config, '', '\t')}`)); }
+        util.logDebug(`getSettings() - Response from BigStatsSettings worker: ${JSON.stringify(resp.body.config, '', '\t')}`);
 
         // Is DEBUG enabled?
         if (resp.body.config.debug === true) {
-          logger.info(this.util.formatLogMessage('DEBUG ENABLED'));
-          DEBUG = true;
+          util.logInfo('DEBUG ENABLED');
+          util.debugEnabled = true;
         } else {
-          DEBUG = false;
+          util.debugEnabled = false;
         }
 
         // If 'interval' has changed, update the task-scheduler task
@@ -262,7 +258,7 @@ BigStats.prototype.getSettings = function () {
         resolve(this.config);
       })
       .catch((err) => {
-        logger.info(this.util.formatLogMessage(`getSettings() - Error retrieving settings from BigStatsSettings worker: ${err}`));
+        util.logError(`getSettings() - Error retrieving settings from BigStatsSettings worker: ${err}`);
         reject(err);
       });
   });
@@ -272,46 +268,49 @@ BigStats.prototype.getSettings = function () {
  * Collect the required statistics from the appropriate BIG-IP Objects
  */
 BigStats.prototype.pullStats = function () {
-  // Execute the BIG-IP stats-scraping workflow
-  this.getSettings()
-    .then(() => {
-      return this.getDeviceStats();
-    })
-    .then(() => {
-      return this.getVipResourceList();
-    })
-    .then((vipResourceList) => {
-      switch (this.config.size) {
-        case 'medium':
-          return this.buildMediumStatsObject(vipResourceList);
-        case 'large':
-          logger.info('[BigStats - ERROR] - largeStats not yet implemented');
-          break;
-        default:
-          return this.buildSmallStatsObject(vipResourceList);
-      }
-    })
-    .then(() => {
-      // Ready the stats for export - Apply stats prefix: 'hostname.services.stats'
-      let statsExpObj = {
-        [this.config.hostname]: {
-          services: this.stats.services,
-          device: this.stats.device
+  return new Promise((resolve, reject) => {
+    let stats = {};
+
+    // Execute the BIG-IP stats-scraping workflow
+    this.getSettings()
+      .then(() => {
+        return this.getDeviceStats();
+      })
+      .then((deviceGlobalStats) => {
+        stats.global = deviceGlobalStats;
+        return this.getVipResourceList();
+      })
+      .then((vipResourceList) => {
+        switch (this.config.size) {
+          case 'medium':
+            return this.buildMediumStatsObject(vipResourceList);
+          case 'large':
+            return this.buildLargeStatsObject(vipResourceList);
+          default:
+            return this.buildSmallStatsObject(vipResourceList);
         }
-      };
+      })
+      .then((tenantStats) => {
+        stats.tenants = tenantStats;
+        // Ready the stats for export - Apply stats prefix: 'hostname.services.stats'
+        let statsExpObj = {
+          device: {
+            id: this.config.hostname,
+            tenants: stats.tenants,
+            global: stats.global
+          }
+        };
 
-      if (DEBUG === true) {
-        // TODO: Refactor this to somehow use the util formatting function
-        logger.info('\n\n*******************************************\n* [BigStats - DEBUG] - BEGIN Stats Object *\n*******************************************\n\n');
-        logger.info(JSON.stringify(statsExpObj, '', '\t'));
-        logger.info('\n\n*******************************************\n*  [BigStats - DEBUG] - END Stats Object  *\n*******************************************\n\n');
-      }
+        util.logDebug('\n\n*******************************************\n* BEGIN Stats Object *\n*******************************************\n\n');
+        util.logDebug(JSON.stringify(statsExpObj, '', '\t'));
+        util.logDebug('\n\n*******************************************\n* END Stats Object  *\n*******************************************\n\n');
 
-      this.exportStats(statsExpObj, this.config.destination.protocol);
-    })
-    .catch((err) => {
-      logger.info(this.util.formatLogMessage(`pullStats() - Promise Chain Error: ${err}`));
-    });
+        resolve(statsExpObj);
+      })
+      .catch((err) => {
+        util.logError(`pullStats() - Promise Chain Error: ${err}`);
+      });
+  });
 };
 
 /**
@@ -319,6 +318,8 @@ BigStats.prototype.pullStats = function () {
 *
 */
 BigStats.prototype.getDeviceStats = function () {
+  let deviceGlobalStats = {};
+
   return new Promise((resolve, reject) => {
     var path = '/mgmt/tm/sys/hostInfo/';
     var uri = this.restHelper.makeRestnodedUri(path);
@@ -326,21 +327,22 @@ BigStats.prototype.getDeviceStats = function () {
 
     this.restRequestSender.sendGet(restOp)
       .then((resp) => {
-        if (DEBUG === true) {
-          logger.info(this.util.formatLogMessage(`getDeviceStats() - resp.statusCode: ${JSON.stringify(resp.statusCode)}`));
-          //        logger.info(this.util.formatLogMessage(`getDeviceStats() - resp.body: ${JSON.stringify(resp.body, '', '\t')}`));   // This is a little too verbose
-        }
+        util.logDebug(`getDeviceStats() - resp.statusCode: ${JSON.stringify(resp.statusCode)}`);
 
-        this.stats.device = {
+        deviceGlobalStats = {
           memory: {
             memoryTotal: resp.body.entries['https://localhost/mgmt/tm/sys/host-info/0'].nestedStats.entries.memoryTotal.value,
             memoryUsed: resp.body.entries['https://localhost/mgmt/tm/sys/host-info/0'].nestedStats.entries.memoryUsed.value
           }
         };
 
+        deviceGlobalStats.cpus = [];
+
         // Iterate through the BIG-IP CPU's
         Object.keys(resp.body.entries['https://localhost/mgmt/tm/sys/host-info/0'].nestedStats.entries['https://localhost/mgmt/tm/sys/hostInfo/0/cpuInfo'].nestedStats.entries).map((cpu) => {
-          let cpuStats = {
+          let cpuId = `cpu${resp.body.entries['https://localhost/mgmt/tm/sys/host-info/0'].nestedStats.entries['https://localhost/mgmt/tm/sys/hostInfo/0/cpuInfo'].nestedStats.entries[cpu].nestedStats.entries.cpuId.value}`;
+          deviceGlobalStats.cpus.push({
+            id: cpuId,
             fiveSecAvgIdle: resp.body.entries['https://localhost/mgmt/tm/sys/host-info/0'].nestedStats.entries['https://localhost/mgmt/tm/sys/hostInfo/0/cpuInfo'].nestedStats.entries[cpu].nestedStats.entries.fiveSecAvgIdle.value,
             fiveSecAvgIowait: resp.body.entries['https://localhost/mgmt/tm/sys/host-info/0'].nestedStats.entries['https://localhost/mgmt/tm/sys/hostInfo/0/cpuInfo'].nestedStats.entries[cpu].nestedStats.entries.fiveSecAvgIowait.value,
             fiveSecAvgIrq: resp.body.entries['https://localhost/mgmt/tm/sys/host-info/0'].nestedStats.entries['https://localhost/mgmt/tm/sys/hostInfo/0/cpuInfo'].nestedStats.entries[cpu].nestedStats.entries.fiveSecAvgIrq.value,
@@ -350,18 +352,12 @@ BigStats.prototype.getDeviceStats = function () {
             fiveSecAvgStolen: resp.body.entries['https://localhost/mgmt/tm/sys/host-info/0'].nestedStats.entries['https://localhost/mgmt/tm/sys/hostInfo/0/cpuInfo'].nestedStats.entries[cpu].nestedStats.entries.fiveSecAvgStolen.value,
             fiveSecAvgSystem: resp.body.entries['https://localhost/mgmt/tm/sys/host-info/0'].nestedStats.entries['https://localhost/mgmt/tm/sys/hostInfo/0/cpuInfo'].nestedStats.entries[cpu].nestedStats.entries.fiveSecAvgSystem.value,
             fiveSecAvgUser: resp.body.entries['https://localhost/mgmt/tm/sys/host-info/0'].nestedStats.entries['https://localhost/mgmt/tm/sys/hostInfo/0/cpuInfo'].nestedStats.entries[cpu].nestedStats.entries.fiveSecAvgUser.value
-          };
-
-          let cpuId = resp.body.entries['https://localhost/mgmt/tm/sys/host-info/0'].nestedStats.entries['https://localhost/mgmt/tm/sys/hostInfo/0/cpuInfo'].nestedStats.entries[cpu].nestedStats.entries.cpuId.value;
-
-          let cpuNum = 'cpu' + cpuId;
-          this.stats.device[cpuNum] = cpuStats;
+          });
         });
-
-        resolve();
+        resolve(deviceGlobalStats);
       })
       .catch((err) => {
-        logger.info(this.util.formatLogMessage(`getDeviceStats(): ${JSON.stringify(err)}`));
+        util.logError(`getDeviceStats(): ${JSON.stringify(err)}`);
         reject(err);
       });
   });
@@ -378,7 +374,7 @@ BigStats.prototype.getDeviceStats = function () {
 */
 BigStats.prototype.buildSmallStatsObject = function (vipResourceList) {
   // Initialize services object
-  this.stats.services = {};
+  let tenantStats = [];
 
   return new Promise((resolve, reject) => {
     // Fetch list of deployed services
@@ -397,22 +393,29 @@ BigStats.prototype.buildSmallStatsObject = function (vipResourceList) {
             servicePath = element.partition;
           }
 
-          // Initialize object on first run
-          if (typeof this.stats.services[servicePath] === 'undefined') {
-            this.stats.services[servicePath] = {};
+          // Check if a tenant entry for this VIP already exists
+          const tenantIndex = tenantStats.findIndex(tenant => tenant.id === servicePath);
+
+          if (tenantIndex === -1) {
+            // Tenant doesn't exist, push to array
+            tenantStats.push({
+              id: servicePath,
+              services: [values]
+            });
+          } else {
+            // Tenant does exist, splice into Tenant array entry
+            tenantStats[tenantIndex].services.splice(tenantIndex, 0, values);
           }
 
-          // Build JavaScript object of stats for each service
-          this.stats.services[servicePath][element.destination] = values;
-
-          if (DEBUG === true) { logger.info(this.util.formatLogMessage(`buildSmallStatsObject() - Processing: ${index} of: ${(vipResourceList.items.length - 1)}`)); }
+          util.logDebug(`buildSmallStatsObject() - Processing: ${index} of: ${(vipResourceList.items.length - 1)}`);
 
           if (index === (vipResourceList.items.length - 1)) {
-            resolve();
+            this.stats = { device: { 'tenants': [tenantStats] } };
+            resolve(tenantStats);
           }
         })
         .catch((err) => {
-          logger.info(this.util.formatLogMessage(`buildSmallStatsObject(): ${JSON.stringify(err)}`));
+          util.logError(`buildSmallStatsObject(): ${err}`);
           reject(err);
         });
     });
@@ -431,15 +434,16 @@ BigStats.prototype.buildSmallStatsObject = function (vipResourceList) {
 */
 BigStats.prototype.buildMediumStatsObject = function (vipResourceList) {
   // Initialize services object
-  this.stats.services = {};
+  let tenantStats = [];
 
   return new Promise((resolve, reject) => {
     // Fetch stats from each resource, based on config.size
     vipResourceList.items.map((vipResource, vipResourceListIndex) => {
-      Promise.all([this.getVipStats(vipResource), this.getPoolResourceList(vipResource)])
-        .then((values) => {
-          var servicePath;
-
+      this.getVipStats(vipResource)
+        .then((results) => {
+          let servicePath;
+          var tenantIndex;
+          var serviceIndex;
           // Check if subPath is un use.
           if ('subPath' in vipResource) {
             // Merge 'tenant' name and 'subPath' name as '/' delimited string.
@@ -448,39 +452,66 @@ BigStats.prototype.buildMediumStatsObject = function (vipResourceList) {
             // 'subPath' is NOT used, use 'tenant' name on its own.
             servicePath = vipResource.partition;
           }
+          util.logDebug(`buildMediumStatsObject() - Processing VIP: ${vipResourceListIndex} of: ${(vipResourceList.items.length - 1)}`);
 
-          // Initialize object on first run
-          if (typeof this.stats.services[servicePath] === 'undefined') {
-            this.stats.services[servicePath] = {};
+          // Check if the tenant and service entries exist
+          tenantIndex = tenantStats.findIndex(tenant => tenant.id === servicePath);
+          if (tenantIndex === -1) {
+            // Tenant & Service don't exist, creating.
+            tenantStats.push({
+              id: servicePath,
+              services: [results]
+            });
+            // Update tenantIndex & serviceIndex for newly created objects.
+            tenantIndex = tenantStats.findIndex(tenant => tenant.id === servicePath);
+            serviceIndex = tenantStats[tenantIndex].services.findIndex(service => service.id === vipResource.destination);
+          } else {
+            // Tenant exists, check if service exists
+            serviceIndex = tenantStats[tenantIndex].services.findIndex(service => service.id === vipResource.destination);
+            if (serviceIndex === -1) {
+              // Service does not exist, creating.
+              tenantStats[tenantIndex].services.push(results);
+              serviceIndex = tenantStats[tenantIndex].services.findIndex(service => service.id === vipResource.destination);
+            }
           }
+          util.logDebug(`tenantStats.length: ${tenantStats.length}, tenantIndex: ${tenantIndex}, serviceIndex: ${serviceIndex}, tenantStats[tenantIndex]: ${JSON.stringify(tenantStats[tenantIndex])}`);
 
-          // Adding VIP data to the 'medium' stats object
-          this.stats.services[servicePath][vipResource.destination] = values[0];
-          this.stats.services[servicePath][vipResource.destination][vipResource.pool] = [];
+          // Verify VIP has a pool attached
+          if (typeof vipResource.poolReference !== 'undefined') {
+            // initialize objects on first run
+            if (typeof tenantStats[tenantIndex].services[serviceIndex].pool === 'undefined') {
+              tenantStats[tenantIndex].services[serviceIndex].pool = {};
+              tenantStats[tenantIndex].services[serviceIndex].pool.id = vipResource.pool;
+              tenantStats[tenantIndex].services[serviceIndex].pool.members = [];
+            }
 
-          values[1].map((poolMemberResource, poolMemberResourceIndex) => {
-            this.getPoolMemberStats(poolMemberResource)
-              .then((stats) => {
-                // Adding Pool data to the 'medium' stats object
-                this.stats.services[servicePath][vipResource.destination][vipResource.pool].push(stats);
+            this.getPoolResourceList(vipResource)
+              .then((poolResourceList) => {
+                poolResourceList.map((poolMemberResource, poolMemberResourceIndex) => {
+                  this.getPoolMemberStats(poolMemberResource)
+                    .then((stats) => {
+                      tenantStats[tenantIndex].services[serviceIndex].pool.members.push(stats);
 
-                if (vipResourceListIndex === (vipResourceList.items.length - 1)) {
-                  if (DEBUG === true) { logger.info(this.util.formatLogMessage(`getPoolMemberStats() - Processing: ${vipResourceListIndex} of: ${(vipResourceList.items.length - 1)}`)); }
-                  if (DEBUG === true) { logger.info(this.util.formatLogMessage(`getPoolMemberStats() - Processing: ${poolMemberResourceIndex} of: ${(values[1].length - 1)}`)); }
+                      if (vipResourceListIndex === (vipResourceList.items.length - 1)) {
+                        util.logDebug(`getPoolMemberStats() - Processing: ${vipResourceListIndex} of: ${(vipResourceList.items.length - 1)}`);
+                        util.logDebug(`getPoolMemberStats() - Processing: ${poolMemberResourceIndex} of: ${(poolResourceList.length - 1)}`);
 
-                  if (poolMemberResourceIndex === (values[1].length - 1)) {
-                    resolve();
-                  }
-                }
-              })
-              .catch((err) => {
-                logger.info(this.util.formatLogMessage(`buildSmallStatsObject(): ${JSON.stringify(err)}`));
-                reject(err);
+                        if (poolMemberResourceIndex === (poolResourceList.length - 1)) {
+                          util.logDebug('VIP & POOL ARRAYs Complete');
+                          resolve(tenantStats);
+                        }
+                      }
+                    })
+                    .catch((err) => {
+                      util.logError(`buildMediumStatsObject(): ${err}`);
+                      reject(err);
+                    });
+                });
               });
-          });
+          }
         })
         .catch((err) => {
-          logger.info(this.util.formatLogMessage(`buildMediumStatsObject(): ${JSON.stringify(err)}`));
+          util.logError(`buildMediumStatsObject(): ${err}`);
           reject(err);
         });
     });
@@ -491,7 +522,7 @@ BigStats.prototype.buildMediumStatsObject = function (vipResourceList) {
 * For 'large' stats size (config.size: large), fetch:
 *   - Virtual IP in/out data
 *   - Individual Pool Member data
-*   - // TODO: Some HTTP stats, maybe??
+*   - SSL stats
 *
 * @param {Object} vipResourceList representing an individual vip resource
 *
@@ -499,9 +530,96 @@ BigStats.prototype.buildMediumStatsObject = function (vipResourceList) {
 *
 */
 BigStats.prototype.buildLargeStatsObject = function (vipResourceList) {
-  // Not yet implemented
-  if (DEBUG === true) { logger.info(this.util.formatLogMessage(`buildLargeStatsObject() with vipResourceList: ${vipResourceList}`)); }
-  logger.info(this.util.formatLogMessage('buildLargeStatsObject() is not yet implemented.'));
+  // Initialize services object
+  let tenantStats = [];
+
+  return new Promise((resolve, reject) => {
+    // Fetch stats from each resource, based on config.size
+    vipResourceList.items.map((vipResource, vipResourceListIndex) => {
+      this.getVipStats(vipResource)
+        .then((results) => {
+          let servicePath;
+          var tenantIndex;
+          var serviceIndex;
+          // Check if subPath is un use.
+          if ('subPath' in vipResource) {
+            // Merge 'tenant' name and 'subPath' name as '/' delimited string.
+            servicePath = vipResource.partition + '/' + vipResource.subPath;
+          } else {
+            // 'subPath' is NOT used, use 'tenant' name on its own.
+            servicePath = vipResource.partition;
+          }
+          util.logDebug(`buildlargeStatsObject() - Processing VIP: ${vipResourceListIndex} of: ${(vipResourceList.items.length - 1)}`);
+
+          // Check if the tenant and service entries exist
+          tenantIndex = tenantStats.findIndex(tenant => tenant.id === servicePath);
+          if (tenantIndex === -1) {
+            // Tenant & Service don't exist, creating.
+            tenantStats.push({
+              id: servicePath,
+              services: [results]
+            });
+            // Update tenantIndex & serviceIndex for newly created objects.
+            tenantIndex = tenantStats.findIndex(tenant => tenant.id === servicePath);
+            serviceIndex = tenantStats[tenantIndex].services.findIndex(service => service.id === vipResource.destination);
+          } else {
+            // Tenant exists, check if service exists
+            serviceIndex = tenantStats[tenantIndex].services.findIndex(service => service.id === vipResource.destination);
+            if (serviceIndex === -1) {
+              // Service does not exist, creating.
+              tenantStats[tenantIndex].services.push(results);
+              serviceIndex = tenantStats[tenantIndex].services.findIndex(service => service.id === vipResource.destination);
+            }
+          }
+          util.logDebug(`tenantStats.length: ${tenantStats.length}, tenantIndex: ${tenantIndex}, serviceIndex: ${serviceIndex}, tenantStats[tenantIndex]: ${JSON.stringify(tenantStats[tenantIndex])}`);
+
+          this.getSslStats(vipResource)
+            .then((sslStats) => {
+              if (Object.keys(sslStats).length !== 0) {
+                tenantStats[tenantIndex].services[serviceIndex].ssl = sslStats;
+              }
+            });
+
+          // Verify VIP has a pool attached
+          if (typeof vipResource.poolReference !== 'undefined') {
+            // initialize objects on first run
+            if (typeof tenantStats[tenantIndex].services[serviceIndex].pool === 'undefined') {
+              tenantStats[tenantIndex].services[serviceIndex].pool = {};
+              tenantStats[tenantIndex].services[serviceIndex].pool.id = vipResource.pool;
+              tenantStats[tenantIndex].services[serviceIndex].pool.members = [];
+            }
+
+            this.getPoolResourceList(vipResource)
+              .then((poolResourceList) => {
+                poolResourceList.map((poolMemberResource, poolMemberResourceIndex) => {
+                  this.getPoolMemberStats(poolMemberResource)
+                    .then((stats) => {
+                      tenantStats[tenantIndex].services[serviceIndex].pool.members.push(stats);
+
+                      if (vipResourceListIndex === (vipResourceList.items.length - 1)) {
+                        util.logDebug(`getPoolMemberStats() - Processing: ${vipResourceListIndex} of: ${(vipResourceList.items.length - 1)}`);
+                        util.logDebug(`getPoolMemberStats() - Processing: ${poolMemberResourceIndex} of: ${(poolResourceList.length - 1)}`);
+
+                        if (poolMemberResourceIndex === (poolResourceList.length - 1)) {
+                          util.logDebug('VIP & POOL ARRAYs Complete');
+                          resolve(tenantStats);
+                        }
+                      }
+                    })
+                    .catch((err) => {
+                      util.logError(`buildLargeStatsObject(): ${err}`);
+                      reject(err);
+                    });
+                });
+              });
+          }
+        })
+        .catch((err) => {
+          util.logError(`buildLargeStatsObject(): ${err}`);
+          reject(err);
+        });
+    });
+  });
 };
 
 /**
@@ -513,21 +631,17 @@ BigStats.prototype.getVipResourceList = function () {
   return new Promise((resolve, reject) => {
     var path = '/mgmt/tm/ltm/virtual/';
     var query = '$select=partition,subPath,fullPath,destination,selfLink,pool';
-
     var uri = this.restHelper.makeRestnodedUri(path, query);
     var restOp = this.createRestOperation(uri);
 
     this.restRequestSender.sendGet(restOp)
       .then((resp) => {
-        if (DEBUG === true) {
-          logger.info(this.util.formatLogMessage(`getVipResourceList - resp.statusCode: ${JSON.stringify(resp.statusCode)}`));
-          logger.info(this.util.formatLogMessage(`getVipResourceList - resp.body: ${JSON.stringify(resp.body, '', '\t')}`));
-        }
-
+        util.logDebug(`getVipResourceList - resp.statusCode: ${JSON.stringify(resp.statusCode)}`);
+        util.logDebug(`getVipResourceList - resp.body: ${JSON.stringify(resp.body, '', '\t')}`);
         resolve(resp.body);
       })
       .catch((err) => {
-        logger.info(this.util.formatLogMessage(`getVipResourceList(): ${JSON.stringify(err)}`));
+        util.logError(`getVipResourceList(): ${err}`);
         reject(err);
       });
   });
@@ -550,9 +664,7 @@ BigStats.prototype.getVipStats = function (vipResource) {
     }
 
     var uri = slicedPath + '/stats';
-
-    if (DEBUG === true) { logger.info(this.util.formatLogMessage(`getVipStats() - Stats URI: ${uri}`)); }
-
+    util.logDebug(`getVipStats() - Stats URI: ${uri}`);
     var url = this.restHelper.makeRestnodedUri(uri);
     var restOp = this.createRestOperation(url);
 
@@ -574,6 +686,7 @@ BigStats.prototype.getVipStats = function (vipResource) {
         }
 
         let vipResourceStats = {
+          id: vipResource.destination,
           clientside_curConns: resp.body.entries[entryUrl].nestedStats.entries['clientside.curConns'].value,
           clientside_maxConns: resp.body.entries[entryUrl].nestedStats.entries['clientside.maxConns'].value,
           clientside_bitsIn: resp.body.entries[entryUrl].nestedStats.entries['clientside.bitsIn'].value,
@@ -585,14 +698,14 @@ BigStats.prototype.getVipStats = function (vipResource) {
         resolve(vipResourceStats);
       })
       .catch((err) => {
-        logger.info(this.util.formatLogMessage(`getVipStats() - Error retrieving vipResrouceStats: ${err}`));
+        util.logError(`getVipStats() - Error retrieving vipResourceStats: ${err}`);
         reject(err);
       });
   });
 };
 
 /**
- * Fetches list of Pools attached to vipResource (see getResource) BIG-IP Services
+ * Fetches list of Pool Members attached to vipResource BIG-IP Services
  *
  * @param {Object} vipResource representing an individual vip resource
  *
@@ -605,7 +718,6 @@ BigStats.prototype.getPoolResourceList = function (vipResource) {
       var cleanPath = '';
       var PREFIX = 'https://localhost';
 
-      // TODO: isn't it always at the beginning? What are we testing?
       if (vipResource.poolReference.link.indexOf(PREFIX) === 0) {
         // PREFIX is exactly at the beginning
         cleanPath = vipResource.poolReference.link.slice(PREFIX.length).split('?').shift();
@@ -613,9 +725,7 @@ BigStats.prototype.getPoolResourceList = function (vipResource) {
 
       var query = '$select=name,selfLink';
       var path = `${cleanPath}/members`;
-
-      if (DEBUG === true) { logger.info(this.util.formatLogMessage(`getPoolResourceList() - Pool Members URI: ${path}`)); }
-
+      util.logDebug(`getPoolResourceList() - Pool Members URI: ${path}`);
       var uri = this.restHelper.makeRestnodedUri(path, query);
       var restOp = this.createRestOperation(uri);
       var poolMemberListObj = [];
@@ -630,7 +740,7 @@ BigStats.prototype.getPoolResourceList = function (vipResource) {
               }
             );
 
-            if (DEBUG === true) { logger.info(this.util.formatLogMessage(`getPoolResourceList() - Processing: ${index} of: ${(resp.body.items.length - 1)}`)); }
+            util.logDebug(`getPoolResourceList() - Processing: ${index} of: ${(resp.body.items.length - 1)}`);
 
             if (index === (resp.body.items.length - 1)) {
               resolve(poolMemberListObj);
@@ -638,7 +748,7 @@ BigStats.prototype.getPoolResourceList = function (vipResource) {
           });
         })
         .catch((err) => {
-          logger.info(this.util.formatLogMessage(`getPoolResourceList(): ${err}`));
+          util.logError(`getPoolResourceList(): ${err}`);
           reject(err);
         });
     }
@@ -659,13 +769,12 @@ BigStats.prototype.getPoolMemberStats = function (poolMemberResource) {
 
     if (poolMemberResource.path.indexOf(PREFIX) === 0) {
       // PREFIX is exactly at the beginning
-      // Remove any trailing querstrings
+      // Remove any trailing querystrings
       path = poolMemberResource.path.slice(PREFIX.length).split('?').shift();
     }
 
     var uri = `${path}/stats`;
-    if (DEBUG === true) { logger.info(this.util.formatLogMessage(`getPoolMemberStats() - Stats URI: ${uri}`)); }
-
+    util.logDebug(`getPoolMemberStats() - Stats URI: ${uri}`);
     var url = this.restHelper.makeRestnodedUri(uri);
     var restOp = this.createRestOperation(url);
 
@@ -683,8 +792,8 @@ BigStats.prototype.getPoolMemberStats = function (poolMemberResource) {
           serverStatus = 0;
         }
 
-        let poolMemberStats = {};
-        poolMemberStats[poolMemberResource.name] = {
+        let poolMemberStats = {
+          id: poolMemberResource.name,
           serverside_curConns: resp.body.entries[entryUrl].nestedStats.entries['serverside.curConns'].value,
           serverside_maxConns: resp.body.entries[entryUrl].nestedStats.entries['serverside.maxConns'].value,
           serverside_bitsIn: resp.body.entries[entryUrl].nestedStats.entries['serverside.bitsIn'].value,
@@ -697,8 +806,243 @@ BigStats.prototype.getPoolMemberStats = function (poolMemberResource) {
         resolve(poolMemberStats);
       })
       .catch((err) => {
-        logger.info(this.util.formatLogMessage(`getPoolMemberStats(): ${err}`));
+        util.logError(`getPoolMemberStats(): ${err}`);
         reject(err);
+      });
+  });
+};
+
+/**
+ * Fetches SSL stats
+ *
+ * @returns {Promise} Promise Object representing individual pool member stats
+ */
+BigStats.prototype.getSslStats = function (vipResource) {
+  return new Promise((resolve, reject) => {
+    var servicePath;
+    // Check if subPath is un use.
+    if ('subPath' in vipResource) {
+      // Merge 'tenant' name and 'subPath' name as '/' delimited string.
+      servicePath = vipResource.partition + '/' + vipResource.subPath;
+    } else {
+      // 'subPath' is NOT used, use 'tenant' name on its own.
+      servicePath = vipResource.partition;
+    }
+
+    Promise.all([this.getVipProfileList(vipResource), this.getSslProfileList()])
+      .then((values) => {
+        const vipProfileList = JSON.stringify(values[0]);
+        let sslProfileList = [];
+        values[1].map((element) => sslProfileList.push(element.name));
+        util.logDebug(`### vipProfileList: ${vipProfileList}`);
+        util.logDebug(`### sslProfileList: ${sslProfileList}`);
+        // Compare a VIP's profile list with the 'client-ssl' profile list
+        const match = values[1].filter(element => vipProfileList.includes(element.name));
+
+        if (Object.keys(match).length === 0) {
+        // This vipResource doesn't have a matching client-ssl profile
+        // Throwing harmless 'no profile found' to escape Promise. Not really an 'error'.
+          const DO_NOTHING = `No SSL profiles associated with: ${servicePath} `;
+          throw DO_NOTHING;
+        } else {
+          util.logDebug(`### Matched: SSL profile. Name: ${match[0].name}, FullPath: ${match[0].fullPath}`);
+          return match[0].fullPath;
+        }
+      })
+      .then((matchedSslProfileFullPath) => {
+        util.logDebug(`### matchedSslProfileFullPath: ${matchedSslProfileFullPath}\n`);
+        return this.getSslProfileStats(matchedSslProfileFullPath);
+      })
+      .then((sslProfileStats) => {
+        util.logDebug(`### sslProfileStats: ${JSON.stringify(sslProfileStats)}`);
+        resolve(sslProfileStats);
+      })
+      .catch((err) => {
+        // Throwing harmless 'no profile found' to escape Promise. Not really an 'error'.
+        if (err.startsWith('No SSL profiles associated')) {
+          util.logDebug(`err: ${err}`);
+        }
+        else {
+          // Catch actual errors.
+          util.logError(`err: ${err}`);
+        }
+      });
+  });
+};
+
+/**
+ * Fetches a VIP's profile list
+ *
+ * @returns {Promise} Promise Object representing individual pool member stats
+ */
+BigStats.prototype.getVipProfileList = function (vipResource) {
+  return new Promise((resolve, reject) => {
+    var slicedPath = '';
+    var PREFIX = 'https://localhost';
+    if (vipResource.selfLink.indexOf(PREFIX) === 0) {
+      slicedPath = vipResource.selfLink.slice(PREFIX.length).split('?').shift();
+    }
+    var uri = slicedPath + '/profiles';
+    var url = this.restHelper.makeRestnodedUri(uri);
+    var restOp = this.createRestOperation(url);
+
+    this.restRequestSender.sendGet(restOp)
+      .then((resp) => {
+        let vipProfileNames = [];
+        resp.body.items.map((item) => {
+          vipProfileNames.push(item.name);
+        });
+        resolve(vipProfileNames);
+      });
+  });
+};
+
+/**
+ * Fetches SSL profile list
+ *
+ * @returns {Promise} Promise Object representing individual pool member stats
+ */
+BigStats.prototype.getSslProfileList = function () {
+  return new Promise((resolve, reject) => {
+    var uri = '/mgmt/tm/ltm/profile/client-ssl';
+    var url = this.restHelper.makeRestnodedUri(uri);
+    var restOp = this.createRestOperation(url);
+
+    this.restRequestSender.sendGet(restOp)
+      .then((resp) => {
+        let sslProfileNames = [];
+        resp.body.items.map((item) => {
+          sslProfileNames.push({ name: item.name, fullPath: item.fullPath });
+        });
+        resolve(sslProfileNames);
+      });
+  });
+};
+
+//       return this.getSslProfileStats(servicePath, matchedSslProfileName);
+BigStats.prototype.getSslProfileStats = function (sslProfileFullPath) {
+  return new Promise((resolve, reject) => {
+    let fullPath = sslProfileFullPath.replace(/\//g, '~');
+    var uri = `/mgmt/tm/ltm/profile/client-ssl/${fullPath}/stats`;
+    var url = this.restHelper.makeRestnodedUri(uri);
+    var restOp = this.createRestOperation(url);
+
+    this.restRequestSender.sendGet(restOp)
+      .then((resp) => {
+        let path = `https://localhost/mgmt/tm/ltm/profile/client-ssl/${fullPath}/${fullPath}/stats`;
+        let sslStats = {
+          id: sslProfileFullPath,
+          common_activeHandshakeRejected: resp.body.entries[path].nestedStats.entries['common.activeHandshakeRejected'].value,
+          common_aggregateRenegotiationsRejected: resp.body.entries[path].nestedStats.entries['common.aggregateRenegotiationsRejected'].value,
+          common_badRecords: resp.body.entries[path].nestedStats.entries['common.badRecords'].value,
+          common_c3dUses_conns: resp.body.entries[path].nestedStats.entries['common.c3dUses.conns'].value,
+          common_cipherUses_adhKeyxchg: resp.body.entries[path].nestedStats.entries['common.cipherUses.adhKeyxchg'].value,
+          common_cipherUses_aesBulk: resp.body.entries[path].nestedStats.entries['common.cipherUses.aesBulk'].value,
+          common_cipherUses_aesGcmBulk: resp.body.entries[path].nestedStats.entries['common.cipherUses.aesGcmBulk'].value,
+          common_cipherUses_camelliaBulk: resp.body.entries[path].nestedStats.entries['common.cipherUses.camelliaBulk'].value,
+          common_cipherUses_desBulk: resp.body.entries[path].nestedStats.entries['common.cipherUses.desBulk'].value,
+          common_cipherUses_dhRsaKeyxchg: resp.body.entries[path].nestedStats.entries['common.cipherUses.dhRsaKeyxchg'].value,
+          common_cipherUses_dheDssKeyxchg: resp.body.entries[path].nestedStats.entries['common.cipherUses.dheDssKeyxchg'].value,
+          common_cipherUses_ecdhEcdsaKeyxchg: resp.body.entries[path].nestedStats.entries['common.cipherUses.ecdhEcdsaKeyxchg'].value,
+          common_cipherUses_ecdhRsaKeyxchg: resp.body.entries[path].nestedStats.entries['common.cipherUses.ecdhRsaKeyxchg'].value,
+          common_cipherUses_ecdheEcdsaKeyxchg: resp.body.entries[path].nestedStats.entries['common.cipherUses.ecdheEcdsaKeyxchg'].value,
+          common_cipherUses_ecdheRsaKeyxchg: resp.body.entries[path].nestedStats.entries['common.cipherUses.ecdheRsaKeyxchg'].value,
+          common_cipherUses_edhRsaKeyxchg: resp.body.entries[path].nestedStats.entries['common.cipherUses.edhRsaKeyxchg'].value,
+          common_cipherUses_ideaBulk: resp.body.entries[path].nestedStats.entries['common.cipherUses.ideaBulk'].value,
+          common_cipherUses_md5Digest: resp.body.entries[path].nestedStats.entries['common.cipherUses.md5Digest'].value,
+          common_cipherUses_nullBulk: resp.body.entries[path].nestedStats.entries['common.cipherUses.nullBulk'].value,
+          common_cipherUses_nullDigest: resp.body.entries[path].nestedStats.entries['common.cipherUses.nullDigest'].value,
+          common_cipherUses_rc2Bulk: resp.body.entries[path].nestedStats.entries['common.cipherUses.rc2Bulk'].value,
+          common_cipherUses_rc4Bulk: resp.body.entries[path].nestedStats.entries['common.cipherUses.rc4Bulk'].value,
+          common_cipherUses_rsaKeyxchg: resp.body.entries[path].nestedStats.entries['common.cipherUses.rsaKeyxchg'].value,
+          common_cipherUses_shaDigest: resp.body.entries[path].nestedStats.entries['common.cipherUses.shaDigest'].value,
+          common_connectionMirroring_haCtxRecv: resp.body.entries[path].nestedStats.entries['common.connectionMirroring.haCtxRecv'].value,
+          common_connectionMirroring_haCtxSent: resp.body.entries[path].nestedStats.entries['common.connectionMirroring.haCtxSent'].value,
+          common_connectionMirroring_haFailure: resp.body.entries[path].nestedStats.entries['common.connectionMirroring.haFailure'].value,
+          common_connectionMirroring_haHsSuccess: resp.body.entries[path].nestedStats.entries['common.connectionMirroring.haHsSuccess'].value,
+          common_connectionMirroring_haPeerReady: resp.body.entries[path].nestedStats.entries['common.connectionMirroring.haPeerReady'].value,
+          common_connectionMirroring_haTimeout: resp.body.entries[path].nestedStats.entries['common.connectionMirroring.haTimeout'].value,
+          common_curCompatConns: resp.body.entries[path].nestedStats.entries['common.curCompatConns'].value,
+          common_curConns: resp.body.entries[path].nestedStats.entries['common.curConns'].value,
+          common_curNativeConns: resp.body.entries[path].nestedStats.entries['common.curNativeConns'].value,
+          common_currentActiveHandshakes: resp.body.entries[path].nestedStats.entries['common.currentActiveHandshakes'].value,
+          common_decryptedBytesIn: resp.body.entries[path].nestedStats.entries['common.decryptedBytesIn'].value,
+          common_decryptedBytesOut: resp.body.entries[path].nestedStats.entries['common.decryptedBytesOut'].value,
+          common_dtlsTxPushbacks: resp.body.entries[path].nestedStats.entries['common.dtlsTxPushbacks'].value,
+          common_encryptedBytesIn: resp.body.entries[path].nestedStats.entries['common.encryptedBytesIn'].value,
+          common_encryptedBytesOut: resp.body.entries[path].nestedStats.entries['common.encryptedBytesOut'].value,
+          common_extendedMasterSecrets: resp.body.entries[path].nestedStats.entries['common.extendedMasterSecrets'].value,
+          common_fatalAlerts: resp.body.entries[path].nestedStats.entries['common.fatalAlerts'].value,
+          common_fullyHwAcceleratedConns: resp.body.entries[path].nestedStats.entries['common.fullyHwAcceleratedConns'].value,
+          common_fwdpUses_alertBypasses: resp.body.entries[path].nestedStats.entries['common.fwdpUses.alertBypasses'].value,
+          common_fwdpUses_cachedCerts: resp.body.entries[path].nestedStats.entries['common.fwdpUses.cachedCerts'].value,
+          common_fwdpUses_clicertFailBypasses: resp.body.entries[path].nestedStats.entries['common.fwdpUses.clicertFailBypasses'].value,
+          common_fwdpUses_conns: resp.body.entries[path].nestedStats.entries['common.fwdpUses.conns'].value,
+          common_fwdpUses_dipBypasses: resp.body.entries[path].nestedStats.entries['common.fwdpUses.dipBypasses'].value,
+          common_fwdpUses_hnBypasses: resp.body.entries[path].nestedStats.entries['common.fwdpUses.hnBypasses'].value,
+          common_fwdpUses_sipBypasses: resp.body.entries[path].nestedStats.entries['common.fwdpUses.sipBypasses'].value,
+          common_handshakeFailures: resp.body.entries[path].nestedStats.entries['common.handshakeFailures'].value,
+          common_insecureHandshakeAccepts: resp.body.entries[path].nestedStats.entries['common.insecureHandshakeAccepts'].value,
+          common_insecureHandshakeRejects: resp.body.entries[path].nestedStats.entries['common.insecureHandshakeRejects'].value,
+          common_insecureRenegotiationRejects: resp.body.entries[path].nestedStats.entries['common.insecureRenegotiationRejects'].value,
+          common_maxCompatConns: resp.body.entries[path].nestedStats.entries['common.maxCompatConns'].value,
+          common_maxConns: resp.body.entries[path].nestedStats.entries['common.maxConns'].value,
+          common_maxNativeConns: resp.body.entries[path].nestedStats.entries['common.maxNativeConns'].value,
+          common_midstreamRenegotiations: resp.body.entries[path].nestedStats.entries['common.midstreamRenegotiations'].value,
+          common_nonHwAcceleratedConns: resp.body.entries[path].nestedStats.entries['common.nonHwAcceleratedConns'].value,
+          common_ocspFwdpClientssl_cachedResp: resp.body.entries[path].nestedStats.entries['common.ocspFwdpClientssl.cachedResp'].value,
+          common_ocspFwdpClientssl_certStatusReq: resp.body.entries[path].nestedStats.entries['common.ocspFwdpClientssl.certStatusReq'].value,
+          common_ocspFwdpClientssl_invalidCertResp: resp.body.entries[path].nestedStats.entries['common.ocspFwdpClientssl.invalidCertResp'].value,
+          common_ocspFwdpClientssl_respstatusErrResp: resp.body.entries[path].nestedStats.entries['common.ocspFwdpClientssl.respstatusErrResp'].value,
+          common_ocspFwdpClientssl_revokedResp: resp.body.entries[path].nestedStats.entries['common.ocspFwdpClientssl.revokedResp'].value,
+          common_ocspFwdpClientssl_stapledResp: resp.body.entries[path].nestedStats.entries['common.ocspFwdpClientssl.stapledResp'].value,
+          common_ocspFwdpClientssl_unknownResp: resp.body.entries[path].nestedStats.entries['common.ocspFwdpClientssl.unknownResp'].value,
+          common_partiallyHwAcceleratedConns: resp.body.entries[path].nestedStats.entries['common.partiallyHwAcceleratedConns'].value,
+          common_peercertInvalid: resp.body.entries[path].nestedStats.entries['common.peercertInvalid'].value,
+          common_peercertNone: resp.body.entries[path].nestedStats.entries['common.peercertNone'].value,
+          common_peercertValid: resp.body.entries[path].nestedStats.entries['common.peercertValid'].value,
+          common_prematureDisconnects: resp.body.entries[path].nestedStats.entries['common.prematureDisconnects'].value,
+          common_protocolUses_dtlsv1: resp.body.entries[path].nestedStats.entries['common.protocolUses.dtlsv1'].value,
+          common_protocolUses_sslv2: resp.body.entries[path].nestedStats.entries['common.protocolUses.sslv2'].value,
+          common_protocolUses_sslv3: resp.body.entries[path].nestedStats.entries['common.protocolUses.sslv3'].value,
+          common_protocolUses_tlsv1: resp.body.entries[path].nestedStats.entries['common.protocolUses.tlsv1'].value,
+          common_protocolUses_tlsv1_1: resp.body.entries[path].nestedStats.entries['common.protocolUses.tlsv1_1'].value,
+          common_protocolUses_tlsv1_2: resp.body.entries[path].nestedStats.entries['common.protocolUses.tlsv1_2'].value,
+          common_recordsIn: resp.body.entries[path].nestedStats.entries['common.recordsIn'].value,
+          common_recordsOut: resp.body.entries[path].nestedStats.entries['common.recordsOut'].value,
+          common_renegotiationsRejected: resp.body.entries[path].nestedStats.entries['common.renegotiationsRejected'].value,
+          common_secureHandshakes: resp.body.entries[path].nestedStats.entries['common.secureHandshakes'].value,
+          common_sessCacheCurEntries: resp.body.entries[path].nestedStats.entries['common.sessCacheCurEntries'].value,
+          common_sessCacheHits: resp.body.entries[path].nestedStats.entries['common.sessCacheHits'].value,
+          common_sessCacheInvalidations: resp.body.entries[path].nestedStats.entries['common.sessCacheInvalidations'].value,
+          common_sessCacheLookups: resp.body.entries[path].nestedStats.entries['common.sessCacheLookups'].value,
+          common_sessCacheOverflows: resp.body.entries[path].nestedStats.entries['common.sessCacheOverflows'].value,
+          common_sessionMirroring_failure: resp.body.entries[path].nestedStats.entries['common.sessionMirroring.failure'].value,
+          common_sessionMirroring_success: resp.body.entries[path].nestedStats.entries['common.sessionMirroring.success'].value,
+          common_sesstickUses_reuseFailed: resp.body.entries[path].nestedStats.entries['common.sesstickUses.reuseFailed'].value,
+          common_sesstickUses_reused: resp.body.entries[path].nestedStats.entries['common.sesstickUses.reused'].value,
+          common_sniRejects: resp.body.entries[path].nestedStats.entries['common.sniRejects'].value,
+          common_totCompatConns: resp.body.entries[path].nestedStats.entries['common.totCompatConns'].value,
+          common_totNativeConns: resp.body.entries[path].nestedStats.entries['common.totNativeConns'].value,
+          dynamicRecord_x1: resp.body.entries[path].nestedStats.entries['dynamicRecord.x1'].value,
+          dynamicRecord_x10: resp.body.entries[path].nestedStats.entries['dynamicRecord.x10'].value,
+          dynamicRecord_x11: resp.body.entries[path].nestedStats.entries['dynamicRecord.x11'].value,
+          dynamicRecord_x12: resp.body.entries[path].nestedStats.entries['dynamicRecord.x12'].value,
+          dynamicRecord_x13: resp.body.entries[path].nestedStats.entries['dynamicRecord.x13'].value,
+          dynamicRecord_x14: resp.body.entries[path].nestedStats.entries['dynamicRecord.x14'].value,
+          dynamicRecord_x15: resp.body.entries[path].nestedStats.entries['dynamicRecord.x15'].value,
+          dynamicRecord_x16: resp.body.entries[path].nestedStats.entries['dynamicRecord.x16'].value,
+          dynamicRecord_x2: resp.body.entries[path].nestedStats.entries['dynamicRecord.x2'].value,
+          dynamicRecord_x3: resp.body.entries[path].nestedStats.entries['dynamicRecord.x3'].value,
+          dynamicRecord_x4: resp.body.entries[path].nestedStats.entries['dynamicRecord.x4'].value,
+          dynamicRecord_x5: resp.body.entries[path].nestedStats.entries['dynamicRecord.x5'].value,
+          dynamicRecord_x6: resp.body.entries[path].nestedStats.entries['dynamicRecord.x6'].value,
+          dynamicRecord_x7: resp.body.entries[path].nestedStats.entries['dynamicRecord.x7'].value,
+          dynamicRecord_x8: resp.body.entries[path].nestedStats.entries['dynamicRecord.x8'].value,
+          dynamicRecord_x9: resp.body.entries[path].nestedStats.entries['dynamicRecord.x9'].value
+        };
+
+        resolve(sslStats);
       });
   });
 };
@@ -709,260 +1053,22 @@ BigStats.prototype.getPoolMemberStats = function (poolMemberResource) {
  * @param {Object} statsObj representing the collected statistics
  */
 // Push stats to a remote destination
-BigStats.prototype.exportStats = function (statsObj, protocol) {
-  switch (protocol) {
-    case 'http':
-    case 'https':
-      this.httpExporter(statsObj);
-      break;
-    case 'statsd':
-      this.statsdExporter(statsObj);
-      break;
-    case 'kafka':
-      this.kafkaExporter(statsObj);
-      break;
-    default:
-      logger.info(this.util.formatLogMessage('Unrecognized \'protocol\''));
-  }
-};
+BigStats.prototype.exportStats = function (statsObj) {
+  var data = { config: this.config, stats: statsObj };
 
-/**
-* Exports data to http/https destinations
-*
-* @param {Object} statsObj to be exported
-*
-*/
-BigStats.prototype.httpExporter = function (statsObj) {
-  var http;
+  util.logDebug(`exportStats() w/:  ${JSON.stringify(data, '', '\t')}`);
 
-  if (this.config.destination.protocol === 'https') {
-    http = require('https');
-  } else {
-    http = require('http');
-  }
+  var uri = '/mgmt/shared/bigstats_exporter';
+  var url = this.restHelper.makeRestnodedUri(uri);
+  var restOp = this.createRestOperation(url, data);
 
-  var options = {
-    'method': 'POST',
-    'hostname': this.config.destination.address,
-    'port': this.config.destination.port,
-    'path': this.config.destination.uri,
-    'headers': {
-      'Content-Type': 'application/json',
-      'Cache-Control': 'no-cache'
-    }
-  };
-
-  var req = http.request(options, function (res) {
-    var chunks = [];
-
-    res.on('data', function (chunk) {
-      chunks.push(chunk);
+  this.restRequestSender.sendPost(restOp)
+    .then((resp) => {
+      util.logDebug(`exportStats() response: ${JSON.stringify(resp.body)}`);
+    })
+    .catch((err) => {
+      util.logError(`exportStats() err: ${err}`);
     });
-
-    res.on('end', function () {
-      var body = Buffer.concat(chunks);
-
-      if (DEBUG === true) { logger.info(this.util.formatLogMessage(`httpExporter() resp: ${body.toString()}`)); }
-    });
-  });
-
-  req.write(JSON.stringify(statsObj));
-
-  req.on('error', (error) => {
-    logger.info(this.util.formatLogMessage(`***************Error pushing stats: ${error}`));
-  });
-
-  req.end();
-};
-
-/**
-* Exports data to StatsD destinations
-*
-* @param {String} data to be exported
-*
-*/
-BigStats.prototype.statsdExporter = function (statsObj) {
-  var sdc = new StatsD(this.config.destination.address, this.config.destination.port);
-  var servicesData = statsObj[this.config.hostname].services;
-  var deviceData = statsObj[this.config.hostname].device;
-
-  // Export device data
-  Object.keys(deviceData).map((level1) => {
-    if (DEBUG === true) { logger.info(this.util.formatLogMessage(`exportStats() - statsd: Device Metric Category: ${level1}`)); }
-
-    Object.keys(deviceData[level1]).map((level2) => {
-      if (DEBUG === true) { logger.info(this.util.formatLogMessage(`exportStats() - statsd: Device Metric Sub-Category: ${level1}.${level2}`)); }
-
-      let namespace = `${this.config.hostname}.device.${level1}.${level2}`;
-      let value = deviceData[level1][level2];
-
-      if (DEBUG === true) { logger.info(this.util.formatLogMessage(`exportStats() - statsd - Device Sub-Category Stats: ${namespace} value: ${value}`)); }
-      sdc.gauge(namespace, value);
-    });
-  });
-
-  // Export services data
-  Object.keys(servicesData).map((level1) => {
-    var l1 = this.replaceDotsSlashesColons(level1);
-
-    if (DEBUG === true) { logger.info(this.util.formatLogMessage(`exportStats() - statsd: Administrative Partition: ${l1}`)); }
-
-    Object.keys(servicesData[level1]).map((level2) => {
-      var l2 = this.replaceDotsSlashesColons(level2);
-
-      if (DEBUG === true) { logger.info(this.util.formatLogMessage(`exportStats() - statsd - Virtual Server: ${l1}.${l2}`)); }
-
-      Object.keys(servicesData[level1][level2]).map((level3) => {
-        var l3 = this.replaceDotsSlashesColons(level3);
-
-        // If the value is a number, send it to statsd.
-        if (typeof servicesData[level1][level2][level3] === 'number') {
-          let namespace = `${this.config.hostname}.services.${l1}.${l2}.${l3}`;
-          let value = servicesData[level1][level2][level3];
-
-          if (DEBUG === true) { logger.info(this.util.formatLogMessage(`exportStats() - statsd - Virtual Server Stats: ${namespace} value: ${value}`)); }
-          sdc.gauge(namespace, value);
-        } // eslint-disable-line brace-style
-
-        // If the value is an object, process the child object..
-        else if (typeof servicesData[level1][level2][level3] === 'object') {
-          if (DEBUG === true) { logger.info(this.util.formatLogMessage(`exportStats() - statsd: Pool: ${l3}`)); }
-
-          Object.keys(servicesData[level1][level2][level3]).map((level4) => {
-            Object.keys(servicesData[level1][level2][level3][level4]).map((level5) => {
-              var l5 = this.replaceDotsSlashesColons(level5);
-              if (DEBUG === true) { logger.info(this.util.formatLogMessage(`exportStats() - statsd: Pool Member: ${l5}`)); }
-
-              Object.keys(servicesData[level1][level2][level3][level4][level5]).map((level6) => {
-                var l6 = this.replaceDotsSlashesColons(level6);
-
-                let namespace = `${this.config.hostname}.services.${l1}.${l2}.${l3}.${l5}.${l6}`;
-                let value = servicesData[level1][level2][level3][level4][level5][level6];
-
-                if (DEBUG === true) { logger.info(this.util.formatLogMessage(`exportStats() - statsd - l6 namespace: ${namespace} value: ${value}`)); }
-                sdc.gauge(namespace, value);
-              });
-            });
-          });
-        }
-      });
-    });
-  });
-};
-
-/**
-* Exports data to Apache Kafka Broker destinations
-*
-* @param {Object} statsObj to be exported
-*
-*/
-BigStats.prototype.kafkaExporter = function (statsObj) {
-  var hostname = this.config.hostname;
-
-  var client = new kafka.KafkaClient(
-    {
-      kafkaHost: `${this.config.destination.address}:${this.config.destination.port}`
-    }
-  );
-
-  var producer = new Producer(client);
-
-  if (typeof this.config.destination.kafka.topic === 'undefined' || this.config.destination.kafka.topic === 'all') {
-    producer.on('ready', function () {
-      var payload = [
-        {
-          topic: hostname,
-          messages: JSON.stringify(statsObj)
-        }
-      ];
-
-      producer.send(payload, function (err, resp) {
-        if (DEBUG === true) { logger.info(this.util.formatLogMessage(`Kafka producer response: ${JSON.stringify(resp)}`)); }
-        if (err) { logger.info(this.util.formatLogMessage(`Kafka producer response: ${err}`)); }
-      });
-    });
-  } else if (typeof this.config.destination.kafka.topic !== 'undefined' && this.config.destination.kafka.topic === 'partition') {
-    var that = this;
-    var data = statsObj[hostname];
-    var message;
-    var safeTopic;
-
-    producer.on('ready', function () {
-      Object.keys(data).map((level1) => {
-        // Build 'device' stats message and send
-        if (level1 === 'device') {
-          safeTopic = hostname + '-device_stats';
-
-          message = {
-            [hostname]: {
-              device: data[level1]
-            }
-          };
-
-          var payload = [
-            {
-              topic: safeTopic,
-              messages: JSON.stringify(message)
-            }
-          ];
-
-          if (DEBUG === true) { logger.info(this.util.formatLogMessage(`exportStats() - kafka: topic: ${safeTopic}`)); }
-          if (DEBUG === true) { logger.info(this.util.formatLogMessage(`exportStats() - kafka: message: ${JSON.stringify(message)}`)); }
-
-          producer.send(payload, function (err, resp) {
-            if (DEBUG === true) { logger.info(this.util.formatLogMessage(`Kafka producer response: ${JSON.stringify(resp)}`)); }
-            if (err) { logger.info(this.util.formatLogMessage(`Kafka producer response: ${err}`)); }
-          });
-        }// eslint-disable-line brace-style
-
-        // Iterate through 'services' building service messages and sending.
-        else {
-          Object.keys(data[level1]).map((level2) => {
-            let safePartitionName = that.replaceDotsSlashesColons(level2);
-            safeTopic = `${hostname}-${safePartitionName}`;
-
-            // Ready the stats for topic-based export - Apply stats prefix: 'hostname.services.data[level1]'
-
-            message = {
-              [hostname]: {
-                service: data[level1][level2]
-              }
-            };
-
-            var payload = [
-              {
-                topic: safeTopic,
-                messages: JSON.stringify(message)
-              }
-            ];
-
-            if (DEBUG === true) { logger.info(this.util.formatLogMessage(`exportStats() - kafka: topic: ${safeTopic}`)); }
-            if (DEBUG === true) { logger.info(this.util.formatLogMessage(`exportStats() - kafka: message: ${JSON.stringify(message)}`)); }
-
-            producer.send(payload, function (err, resp) {
-              if (DEBUG === true) { logger.info(this.util.formatLogMessage(`Kafka producer response: ${JSON.stringify(resp)}`)); }
-              if (err) { logger.info(this.util.formatLogMessage(`Kafka producer response: ${err}`)); }
-            });
-          });
-        }
-      });
-    });
-  }
-
-  producer.on('error', function (err) {
-    logger.info(this.util.formatLogMessage(`Kafka Producer error: ${err}`));
-  });
-};
-
-/**
-* Escapes Slashes and Colons
-*
-* @param {String} notReplaced string that needs character replacement
-*
-* @returns {String} without dots slashes or colons
-*/
-BigStats.prototype.replaceDotsSlashesColons = function (notReplaced) {
-  return notReplaced.replace(/[.|/|:]/g, '-');
 };
 
 /**
@@ -984,15 +1090,6 @@ BigStats.prototype.createRestOperation = function (uri, body) {
   }
 
   return restOp;
-};
-
-/**
- * handle /example HTTP request
- */
-BigStats.prototype.getExampleState = function () {
-  return {
-    // redirct to /bigstats_settings
-  };
 };
 
 module.exports = BigStats;
