@@ -1,24 +1,20 @@
 language: node_js
 node_js:
-- 6.9.1
+  - 6.9.1
 branches:
   only:
   - develop
-services:
-- docker
-before_install:
-- docker build -t bigstats/rpm-build-container ./build/
 script:
-- "./node_modules/istanbul/lib/cli.js cover --config ./istanbul.yml ./node_modules/mocha/bin/_mocha
-  ./TEST/UNIT/ --report lcovonly -- -R spec && ./node_modules/.bin/codecov"
-- docker run --rm -v $(pwd):/home/bigstats:rw bigstats/rpm-build-container /bin/sh
-  -c "cd /home/bigstats;./build/buildRpm.sh;"
+  - "./node_modules/istanbul/lib/cli.js cover --config ./istanbul.yml ./node_modules/mocha/bin/_mocha ./TEST/UNIT/ --report lcovonly -- -R spec && ./node_modules/.bin/codecov"
+  - "cd /home/bigstats;./build/buildRpm.sh;"
 deploy:
   provider: releases
   api_key:
     secure: Hxcv/slERdBgFdRZJtW5sQEoxrM78vITjq3OkY7RZO+AzcyvVEacFQ3qXndkK+2jK/bHTRFoFYlXfLjhtr9/NXLC8jXhRGksMR4ChvAhOXAf9dNTYG6y6Su/5I5HVuAHzPP6lmKeFsfHdWgxatUH9Y2zkVD9gH8C+ogKndfLLAHB1wp0o7oZXFBGseMod4V+d1XMr17u3bJjTK82FfbF/JFsJ8Ni+6y6RlLXbVhn1bPt+yMmba7E4XEEy0c2z5dP9boCAQ0tWqEA1poj3htGUEZC7GUBBJL264UaGflWdCzPHuQcmvvG0i2nlJEOP3zsWLA4lH4fgxbZVlhKDY0xuQV0sV7ut7Tb1ztNLkho9VU8y87XhMOaOimdRSGsSc3DkPlPDRWILdVaAzzdLp1ncox9ManCio4gSe1/wZErWUzCLXV9GtJpHP2+hzLvbJ5DhCf8tnPGCUBPkTZ2Jt0EdVu+LX6c8QeUuMOTAb712/p2Y6qMykvhu2O8KynHa5cRhbAmnpFcsvBN6owGSbbjLfG6L/UcbiKkQmVxDx6eK8ZhFkpcDmK9PcFeq8Id0QCmCcwsc0kQ0pRCvrpUCcGtUT3qODuAckTExaLHgxoKIRXTaW8bbHrS2U48rSVhFiisxmUiSIP96ySz8tSkinulSARZ9Q68wOVoBV84aHakYiI=
   file_glob: true
-  file: build/rpmbuild/RPMS/noarch/BigStats-*.noarch.rpm
+  file: 
+    - build/rpmbuild/RPMS/noarch/BigStats-*.noarch.rpm
+    - build/rpmbuild/RPMS/noarch/BigStats-*.noarch.rpm.sha256
   on:
     repo: aknot242/BigStats
     branch: develop
