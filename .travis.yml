@@ -6,7 +6,7 @@ branches:
   - develop
 script:
   - "./node_modules/istanbul/lib/cli.js cover --config ./istanbul.yml ./node_modules/mocha/bin/_mocha ./TEST/UNIT/ --report lcovonly -- -R spec && ./node_modules/.bin/codecov"
-  - "cd /home/bigstats;./build/buildRpm.sh;"
+  - "./build/buildRpm.sh;"
 deploy:
   provider: releases
   api_key:
