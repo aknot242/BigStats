@@ -1,4 +1,4 @@
-Summary: F5 BigStats iControlLX extension
+Summary: F5 BigStats iControlLX Extension
 Name: BigStats
 Version: %{_version}
 Release: %{_release}
