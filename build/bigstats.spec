@@ -14,6 +14,7 @@ The BIG-IP Telemetry Exporter
 
 %define _rpmfilename %%{ARCH}/%%{NAME}-%%{VERSION}-%%{RELEASE}.%%{ARCH}.rpm
 %define IAPP_INSTALL_DIR /var/config/rest/iapps/%{name}
+%define _binaries_in_noarch_packages_terminate_build 0
 
 %prep
 rm -rf %{_builddir}/*
