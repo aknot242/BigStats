@@ -1,3 +1,3 @@
 FROM node:8-alpine
 
-RUN apk add rpm bash python make
+RUN apk add rpm bash build-base
