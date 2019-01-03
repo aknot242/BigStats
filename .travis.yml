@@ -22,3 +22,4 @@ deploy:
   on:
     repo: aknot242/BigStats
     branch: develop
+    tags: true

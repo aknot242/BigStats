@@ -1,6 +1,6 @@
 #!/bin/bash
-VERSION=0.6
-RELEASE=0010
+VERSION=${TRAVIS_TAG}
+RELEASE=${TRAVIS_JOB_NUMBER}
 RPM_NAME=BigStats-${VERSION}-${RELEASE}.noarch.rpm
 rm -rf node_modules
 npm install --production
