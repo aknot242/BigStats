@@ -129,7 +129,7 @@ describe('Util', function () {
   describe('logError', function () {
     it('should emit expected error string', function () {
       util.logError('something really bad happened');
-      sinon.assert.calledWith(f5LoggerInfoSpy, '[TestModule - ERROR] - something really bad happened');
+      sinon.assert.calledWith(f5LoggerInfoSpy, '[TestModule - ERRORZ] - something really bad happened');
     });
   });
 });
