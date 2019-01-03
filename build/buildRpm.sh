@@ -1,7 +1,11 @@
 #!/bin/bash
+# create the version number from the lightweight Git Tag, removing the first character ('v'). Converts v0.6.1 to 0.6.1
 VERSION=$(echo $TRAVIS_TAG | cut -c 2-)
+
+# use the Travis CI job number as the basis for the release number. Delete the decimal, then pad with zeroes. Converts 19.1 to 0191
 TMP_JOB_NUM=$(echo ${TRAVIS_JOB_NUMBER} | tr -d .)
 RELEASE=$(printf "%04d\n" ${TMP_JOB_NUM})
+
 RPM_NAME=BigStats-${VERSION}-${RELEASE}.noarch.rpm
 rm -rf node_modules
 npm install --production
