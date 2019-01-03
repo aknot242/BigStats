@@ -4,6 +4,7 @@ node_js:
 branches:
   only:
   - develop
+  - /^v\d+\.\d*\.?\d*$/ # Build on tags - allow branches with version numbers matching a pattern example: v0.6.1
 before_install:
   - sudo apt-get update
   - sudo apt-get install -y rpm  
