@@ -1,5 +1,5 @@
 #!/bin/bash
-VERSION=${TRAVIS_TAG}
+VERSION=$(echo $TRAVIS_TAG | cut -c 2-)
 RELEASE=${TRAVIS_JOB_NUMBER}
 RPM_NAME=BigStats-${VERSION}-${RELEASE}.noarch.rpm
 rm -rf node_modules
